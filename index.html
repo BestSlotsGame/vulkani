@@ -1,0 +1,197 @@
+<head>
+    <script src="//cdnjs.cloudflare.com/ajax/libs/d3/4.11.0/d3.min.js"></script>
+    <script src="//cdnjs.cloudflare.com/ajax/libs/topojson/3.0.2/topojson.min.js"></script>
+    <script src="//cdnjs.cloudflare.com/ajax/libs/dat-gui/0.6.5/dat.gui.js"></script>
+    <script src="//unpkg.com/d3-geo-voronoi@0"></script>
+    <script src="//unpkg.com/d3-geo-zoom@1"></script>
+
+    <style>
+        body { margin: 0 }
+
+        #world {
+            cursor: grab;
+            cursor: -webkit-grab;
+        }
+
+        #world:active {
+            cursor: grabbing;
+            cursor: -webkit-grabbing;
+        }
+
+        .sphere {
+            fill: aqua;
+            fill-opacity: 0.04;
+        }
+
+        .land {
+            fill: darkgrey;
+            fill-opacity: 0.2;
+        }
+
+        .graticule {
+            stroke: black;
+            stroke-width: 0.1;
+            stroke-opacity: 0.3;
+            fill: none;
+        }
+
+        .plate {
+            fill: darkslategrey;
+            fill-opacity: 0;
+            stroke: darkslategrey;
+            stroke-width: 0.3;
+            stroke-opacity: 0.5;
+        }
+
+        .plate:hover {
+            fill-opacity: 0.07;
+        }
+
+        .voronoi {
+            fill: red;
+            fill-opacity: 0;
+            stroke: black;
+            stroke-width: 0.2;
+            stroke-opacity: 0.3;
+        }
+
+        .voronoi:hover {
+            fill-opacity: 0.1;
+        }
+
+        .urquhart {
+            stroke: maroon;
+            stroke-width: 0.4;
+            stroke-opacity: 0.7;
+            fill: none;
+        }
+
+        .volcano {
+            stroke: maroon;
+            stroke-width: 0;
+            stroke-opacity: 0.4;
+            fill: maroon;
+            fill-opacity: 0.5;
+            cursor: default;
+            transition: stroke-width 0.7s;
+        }
+
+        .volcano:hover {
+            stroke-width: 6px;
+            transition: stroke-width 0.07s;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="world"></div>
+
+    <script>
+        const MAX_URQUHART_DISTANCE = 0.15; // geo radians
+
+        // Controls
+        const gui = new dat.GUI();
+        const controls = {
+            'Volcanoes': true,
+            'Graticule Grid': true,
+            'Tectonic Plates': true,
+            'Voronoi Layer': false,
+            'Urquhart Layer': true
+        };
+        gui.add(controls, 'Volcanoes').onChange(enabled => d3.selectAll('.volcano').style('display', enabled ? null : 'none'));
+        gui.add(controls, 'Graticule Grid').onChange(enabled => d3.selectAll('.graticule').style('display', enabled ? null : 'none'));
+        gui.add(controls, 'Tectonic Plates').onChange(enabled => d3.selectAll('.plate').style('display', enabled ? null : 'none'));
+        gui.add(controls, 'Voronoi Layer').onChange(enabled => d3.selectAll('.voronoi').style('display', enabled ? null : 'none'));
+        gui.add(controls, 'Urquhart Layer').onChange(enabled => d3.selectAll('.urquhart').style('display', enabled ? null : 'none'));
+
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+
+        const svg = d3.select('#world').append('svg')
+            .attr('width', width)
+            .attr('height', height);
+
+        const projection = d3.geoOrthographic()
+            .scale((height - 10) / 2)
+            .translate([width / 2, height / 2])
+            .rotate([0, -35, 0])
+            .precision(0.1);
+
+        const path = d3.geoPath()
+            .projection(projection)
+            .pointRadius(1.7);
+
+        d3.geoZoom()
+            .projection(projection)
+            .onMove(render)
+            (svg.node());
+
+        d3.queue()
+            .defer(d3.json, '//unpkg.com/world-atlas@1/world/110m.json')
+            .defer(d3.json, 'plates.stitched.geo.json')
+            .defer(d3.json, 'world_volcanoes.json')
+            .awaitAll((error, [world, tectonicPlates, volcanoes]) => {
+                if (error) throw error;
+
+                // water
+                svg.append('path').attr('class', 'geo sphere')
+                    .datum({ type: 'Sphere' });
+
+                // land
+                svg.append('path').attr('class', 'geo land')
+                    .datum(topojson.feature(world, world.objects.land).features[0]);
+
+                // graticules
+                svg.append('path').attr('class', 'geo graticule')
+                    .datum(d3.geoGraticule10());
+
+                // tectonic plates
+                svg.append('g').selectAll('.plate')
+                    .data(tectonicPlates.features)
+                    .enter().append('path')
+                        .attr('class', 'geo plate')
+                        .append('title').text(({properties: p}) => `Plate: ${p.PlateName} (${p.Code})`);
+
+                    const voronoi = d3.geoVoronoi()
+                    .x(d => d.lon)
+                    .y(d => d.lat)
+                    (volcanoes);
+
+                // voronoi polygons
+                svg.append('g').selectAll('.voronoi')
+                    .data(voronoi.polygons().features)
+                    .enter().append('path')
+                        .attr('class', 'geo voronoi')
+                        .style('display', 'none') // hidden by default
+                        .append('title').text(({properties: { site: d}}) => `${d.name}, ${d.country} (${d.type}) [${d.elevation}m]`);
+
+                const urquhart = voronoi.links();
+                urquhart.features = urquhart.features.filter(f => f.properties.urquhart && f.properties.length < MAX_URQUHART_DISTANCE);
+
+                // urquhart links
+                svg.append('path')
+                    .attr('class', 'geo urquhart')
+                    .datum(urquhart);
+
+                // volcano points
+                svg.append('g').selectAll('.volcano')
+                    .data(volcanoes)
+                    .enter().append('path')
+                        .attr('class', 'geo volcano')
+                        .datum(d => ({
+                            type: 'Point',
+                            coordinates: [d.lon, d.lat],
+                            properties: d
+                        }))
+                        .append('title').text(({ properties: d }) => `${d.name}, ${d.country} (${d.type}) [${d.elevation}m]`);
+
+                render();
+            });
+
+        //
+
+        function render() {
+            svg.selectAll('path.geo').attr('d', path);
+        }
+    </script>
+</body>
